@@ -1,89 +1,99 @@
+// server.js
+
+// 1️⃣ Załaduj .env zanim cokolwiek innego
 require('dotenv').config();
+
 const express = require('express');
-const bodyParser = require('body-parser');
 const cors = require('cors');
-const twilio = require('twilio');
 
 const twilioRoutes = require('./routes/twilio');
 const logger = require('./utils/logger');
 
 const app = express();
+
+// 2️⃣ Ustaw port i host (Railway nadpisze PORT automatycznie)
 const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0'; // słuchamy na wszystkich interfejsach
 
+// 3️⃣ Middleware do CORS i parsowania ciał żądań
 app.use(cors());
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: false })); // odczyt form data (Twilio!)
+app.use(express.json());                          // odczyt JSON
 
+// 4️⃣ Logger – wypisz każde zapytanie
 app.use((req, res, next) => {
-    logger.info(`${req.method} ${req.path} - ${req.ip}`);
-    next();
+  logger.info(`📨 ${req.method} ${req.path} from ${req.ip}`);
+  next();
 });
 
+// 5️⃣ Prosty endpoint “alive” / health
 app.get('/', (req, res) => {
-    res.json({
-        status: 'success',
-        message: 'Stomatologia Kraków - AI Voice Receptionist',
-        version: '1.0.0',
-        timestamp: new Date().toISOString()
-    });
+  res.json({
+    status: 'success',
+    message: 'Stomatologia Kraków – AI Voice Receptionist',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.get('/health', (req, res) => {
-    res.status(200).json({
-        status: 'healthy',
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
-    });
+  res.status(200).json({
+    status: 'healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
 });
 
+// 6️⃣ Główna ścieżka dla Twilio – wszystkie /twilio/voice itd.
 app.use('/twilio', twilioRoutes);
 
-app.use((err, req, res, next) => {
-    logger.error('Unhandled error:', err);
-    res.status(500).json({
-        status: 'error',
-        message: 'Something went wrong!',
-        error: process.env.NODE_ENV === 'development' ? err.message : {}
-    });
-});
-
+// 7️⃣ 404 – jeśli żaden powyższy route nie zadziałał
 app.use('*', (req, res) => {
-    res.status(404).json({
-        status: 'error',
-        message: 'Route not found'
-    });
+  res.status(404).json({
+    status: 'error',
+    message: 'Route not found'
+  });
 });
 
-app.listen(PORT, () => {
-    logger.info(`🚀 Server running on port ${PORT}`);
-    logger.info(`🏥 Stomatologia Kraków AI Receptionist ACTIVE`);
-    logger.info(`📞 Twilio webhook URL: /twilio/voice`);
-    
-    const requiredEnvVars = [
-        'TWILIO_ACCOUNT_SID',
-        'TWILIO_AUTH_TOKEN', 
-        'OPENAI_API_KEY',
-        'AZURE_SPEECH_KEY'
-    ];
-    
-    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
-    
-    if (missingVars.length > 0) {
-        logger.error('❌ Missing environment variables:');
-        missingVars.forEach(varName => {
-            logger.error(`   - ${varName}`);
-        });
-    } else {
-        logger.info('✅ All environment variables loaded successfully');
-    }
+// 8️⃣ Error handler – łapie wszystkie nieprzewidziane błędy
+app.use((err, req, res, next) => {
+  logger.error('❌ UNHANDLED ERROR:', err);
+  res.status(500).json({
+    status: 'error',
+    message: 'Coś poszło nie tak!',
+    // w dev pokażemy szczegóły, w prod nie
+    error: process.env.NODE_ENV === 'development' ? err.message : {}
+  });
+});
+
+// 9️⃣ Start serwera
+app.listen(PORT, HOST, () => {
+  logger.info(`🚀 Serwer działa na http://${HOST}:${PORT}`);
+  logger.info('🔑 Sprawdzam zmienne środowiskowe…');
+
+  const requiredEnv = [
+    'TWILIO_ACCOUNT_SID',
+    'TWILIO_AUTH_TOKEN',
+    'OPENAI_API_KEY',
+    'AZURE_SPEECH_KEY',
+    'AZURE_SPEECH_REGION'
+  ];
+  const missing = requiredEnv.filter(v => !process.env[v] || process.env[v].trim() === '');
+  if (missing.length) {
+    logger.error('❌ Brakuje zmiennych środowiskowych:');
+    missing.forEach(v => logger.error(`   • ${v}`));
+  } else {
+    logger.info('✅ Wszystkie zmienne środowiskowe OK');
+  }
+
+  logger.info(`📞 Twilio webhook: POST /twilio/voice`);
 });
 
 process.on('SIGTERM', () => {
-    logger.info('🛑 SIGTERM received, shutting down gracefully');
-    process.exit(0);
+  logger.info('🛑 SIGTERM – zamykam się');
+  process.exit(0);
 });
-
 process.on('SIGINT', () => {
-    logger.info('🛑 SIGINT received, shutting down gracefully');
-    process.exit(0);
+  logger.info('🛑 SIGINT – zamykam się');
+  process.exit(0);
 });

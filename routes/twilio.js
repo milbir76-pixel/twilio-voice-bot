@@ -1,60 +1,149 @@
 const express = require('express');
-const axios = require('axios');
-const { VoiceResponse } = require('twilio').twiml;
-
+const twilio = require('twilio');
+const logger = require('../utils/logger');
 const openaiService = require('../services/openai');
 const azureSpeechService = require('../services/azure-speech');
 const calendarService = require('../services/calendar');
 
 const router = express.Router();
+const VoiceResponse = twilio.twiml.VoiceResponse;
 
-router.post('/voice', (req, res) => {
-  const twiml = new VoiceResponse();
-  twiml.say(
-    { voice: 'Polish-CentralEurope-Neural', language: 'pl-PL' },
-    'Witaj w klinice Stomatologia Kraków. Proszę powiedzieć, jak mogę pomóc, a po sygnale zacznie się nagrywanie.'
-  );
-  twiml.record({
-    action: `${process.env.BASE_URL}/twilio/record`,
-    method: 'POST',
-    maxLength: 10,
-    playBeep: true
-  });
-  twiml.say('Nie otrzymałem żadnej odpowiedzi. Kończę połączenie. Do widzenia.');
-  twiml.hangup();
+router.post('/voice', async (req, res) => {
+    const twiml = new VoiceResponse();
+    const from = req.body.From;
+    const to = req.body.To;
+    
+    logger.info(`Incoming call from ${from} to ${to}`);
 
-  res.type('text/xml').send(twiml.toString());
+    try {
+        const welcomeMessage = `Dzień dobry! Tu Stomatologia Kraków, recepcja automatyczna. 
+        Jestem tutaj, żeby pomóc Panu lub Pani umówić wizytę. 
+        Proszę powiedzieć, jak mogę pomóc?`;
+
+        twiml.say(welcomeMessage, {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
+
+        twiml.gather({
+            input: 'speech',
+            timeout: 10,
+            speechTimeout: 'auto',
+            language: 'pl-PL',
+            action: '/twilio/process-speech',
+            method: 'POST'
+        });
+
+        twiml.say('Przepraszam, nie słyszałem odpowiedzi. Spróbujmy ponownie.', {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
+
+        twiml.redirect('/twilio/voice');
+
+    } catch (error) {
+        logger.error('Error in voice webhook:', error);
+        twiml.say('Przepraszam, wystąpił błąd techniczny. Proszę zadzwonić ponownie.', {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
+    }
+
+    res.type('text/xml');
+    res.send(twiml.toString());
 });
 
-router.post('/record', async (req, res) => {
-  const recordingUrl = req.body.RecordingUrl + '.wav';
-  const twiml = new VoiceResponse();
+router.post('/process-speech', async (req, res) => {
+    const twiml = new VoiceResponse();
+    const speechResult = req.body.SpeechResult;
+    const from = req.body.From;
+    
+    logger.info(`Speech received from ${from}: "${speechResult}"`);
 
-  try {
-    const audioResp = await axios.get(recordingUrl, { responseType: 'arraybuffer' });
-    const audioBuffer = Buffer.from(audioResp.data);
+    try {
+        if (!speechResult) {
+            twiml.say('Nie słyszałem Pana wypowiedzi. Proszę spróbować ponownie.', {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+            twiml.redirect('/twilio/voice');
+            res.type('text/xml');
+            res.send(twiml.toString());
+            return;
+        }
 
-    const userText = await azureSpeechService.recognizeSpeech(audioBuffer);
+        const aiResponse = await openaiService.processUserMessage(speechResult, from);
+        
+        if (aiResponse.action === 'book_appointment') {
+            const availableSlots = await calendarService.getAvailableSlots();
+            const responseText = `${aiResponse.message} Dostępne terminy to: ${availableSlots.join(', ')}. Który termin Panu odpowiada?`;
+            
+            twiml.say(responseText, {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+        } else if (aiResponse.action === 'provide_info') {
+            twiml.say(aiResponse.message, {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+        } else if (aiResponse.action === 'transfer_to_reception') {
+            twiml.say('Łączę Pana z recepcją. Proszę czekać.', {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+            twiml.say('Numer recepcji to +48 123 456 789. Dziękuję za telefon.', {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+            twiml.hangup();
+            res.type('text/xml');
+            res.send(twiml.toString());
+            return;
+        } else {
+            twiml.say(aiResponse.message, {
+                voice: 'alice',
+                language: 'pl-PL'
+            });
+        }
 
-    const messages = [
-      { role: 'system', content: `Jesteś recepcjonistą kliniki Stomatologia Kraków. Udzielaj informacji po polsku według ustalonego promptu.` },
-      { role: 'user', content: userText }
-    ];
-    const botReply = await openaiService.getChatResponse(messages);
+        twiml.gather({
+            input: 'speech',
+            timeout: 10,
+            speechTimeout: 'auto',
+            language: 'pl-PL',
+            action: '/twilio/process-speech',
+            method: 'POST'
+        });
 
-    const speechBuffer = await azureSpeechService.synthesizeSpeech(botReply);
-    const base64 = speechBuffer.toString('base64');
+        twiml.say('Czy mogę jeszcze w czymś pomóc?', {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
 
-    twiml.play({ loop: 1 }, `data:audio/wav;base64,${base64}`);
-    twiml.hangup();
-  } catch (err) {
-    twiml.say(
-      'Przepraszam, wystąpił błąd podczas obsługi rozmowy. Proszę skontaktować się z recepcją pod numerem +48 123 456 789.'
-    );
-    twiml.hangup();
-  }
+    } catch (error) {
+        logger.error('Error processing speech:', error);
+        twiml.say('Przepraszam, miałem problem ze zrozumieniem. Łączę z recepcją.', {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
+        twiml.say('Numer recepcji to +48 123 456 789.', {
+            voice: 'alice',
+            language: 'pl-PL'
+        });
+    }
 
-  res.type('text/xml').send(twiml.toString());
+    res.type('text/xml');
+    res.send(twiml.toString());
+});
+
+router.post('/status', (req, res) => {
+    const callStatus = req.body.CallStatus;
+    const from = req.body.From;
+    const duration = req.body.CallDuration;
+    
+    logger.info(`Call from ${from} ended with status: ${callStatus}, duration: ${duration}s`);
+    res.sendStatus(200);
 });
 
 module.exports = router;

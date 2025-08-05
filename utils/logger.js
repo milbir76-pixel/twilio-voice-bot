@@ -1,32 +1,34 @@
-// utils/logger.js
-// Prosty logger oparty na bibliotece Winston
+const winston = require('winston');
 
-const { createLogger, format, transports } = require('winston');
-const { combine, timestamp, printf, colorize } = format;
-
-// Definiujemy format logów: data, poziom, wiadomość
-const logFormat = printf(({ level, message, timestamp }) => {
-  return `${timestamp} [${level}]: ${message}`;
+const logger = winston.createLogger({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    format: winston.format.combine(
+        winston.format.timestamp({
+            format: 'YYYY-MM-DD HH:mm:ss'
+        }),
+        winston.format.errors({ stack: true }),
+        winston.format.printf(({ level, message, timestamp, stack }) => {
+            return `${timestamp} [${level.toUpperCase()}]: ${stack || message}`;
+        })
+    ),
+    transports: [
+        new winston.transports.Console({
+            format: winston.format.combine(
+                winston.format.colorize(),
+                winston.format.simple()
+            )
+        })
+    ]
 });
 
-// Tworzymy instancję loggera
-const logger = createLogger({
-  level: 'info',  // domyślny poziom logowania
-  format: combine(
-    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    colorize(),
-    logFormat
-  ),
-  transports: [
-    new transports.Console(), // logi do konsoli
-    // Aby zapisywać do pliku, odkomentuj:
-    // new transports.File({ filename: 'logs/app.log' })
-  ],
-  exceptionHandlers: [
-    new transports.Console(),
-    // new transports.File({ filename: 'logs/exceptions.log' })
-  ],
-  exitOnError: false  // nie zamykaj aplikacji przy błędzie logowania
-});
+if (process.env.NODE_ENV === 'production') {
+    logger.add(new winston.transports.File({
+        filename: 'logs/error.log',
+        level: 'error'
+    }));
+    logger.add(new winston.transports.File({
+        filename: 'logs/combined.log'
+    }));
+}
 
 module.exports = logger;
