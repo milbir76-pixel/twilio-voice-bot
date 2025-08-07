@@ -7,7 +7,7 @@ const speechConfig = sdk.SpeechConfig.fromSubscription(
 );
 
 speechConfig.speechRecognitionLanguage = 'pl-PL';
-speechConfig.speechSynthesisVoiceName = 'pl-PL-JennyDragonHDLatest';
+speechConfig.speechSynthesisVoiceName = 'en-US-JennyMultilingualNeural';
 
 async function textToSpeech(text) {
     try {
