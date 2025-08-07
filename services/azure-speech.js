@@ -7,7 +7,7 @@ const speechConfig = sdk.SpeechConfig.fromSubscription(
 );
 
 speechConfig.speechRecognitionLanguage = 'pl-PL';
-speechConfig.speechSynthesisVoiceName = 'pl-PL-ZofiaNeural';
+speechConfig.speechSynthesisVoiceName = 'pl-PL-JennyDragonHDLatest';
 
 async function textToSpeech(text) {
     try {
