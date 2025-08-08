@@ -8,8 +8,12 @@ const cors = require('cors');
 
 const twilioRoutes = require('./routes/twilio');
 const logger = require('./utils/logger');
+const azureTTS = require('./services/azure-speech'); // ⬅️ Azure TTS
 
 const app = express();
+
+// 🔒 Zaufaj proxy (Railway/Load balancer) – poprawne proto/host w req.*
+app.set('trust proxy', true);
 
 // 2️⃣ Ustaw port i host (Railway nadpisze PORT automatycznie)
 const PORT = process.env.PORT || 3000;
@@ -44,10 +48,45 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 6️⃣ Główna ścieżka dla Twilio – wszystkie /twilio/voice itd.
+/**
+ * 🔊 6️⃣ Endpoint TTS – zwraca audio/wav (8kHz μ-law) dla Twilio <Play>
+ *    Użycie:  GET /tts?text=Twoj%20tekst  (opcjonalnie &voice=pl-PL-MarekNeural)
+ */
+app.get('/tts', async (req, res, next) => {
+  try {
+    const raw = (req.query.text ?? 'Dzień dobry!').toString();
+    // ogranicz długość (bezpieczeństwo + szybszy TTS)
+    const text = raw.trim().slice(0, 800);
+
+    // opcjonalna zmiana głosu: ?voice=pl-PL-MarekNeural
+    const voice = typeof req.query.voice === 'string' ? req.query.voice : undefined;
+
+    const audioBuf = await azureTTS.textToSpeech(text, voice);
+
+    res.set('Content-Type', 'audio/wav');
+    res.set('Content-Disposition', 'inline; filename=tts.wav');
+    // bez cache – każda odpowiedź może być inna
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.send(audioBuf);
+  } catch (e) {
+    logger.error('TTS endpoint error:', e);
+    // nie wywalamy 500 bez treści – Twilio lepiej zareaguje na WAV z komunikatem
+    try {
+      const fallback = await azureTTS.textToSpeech('Przepraszam, wystąpił błąd techniczny.');
+      res.set('Content-Type', 'audio/wav');
+      res.set('Content-Disposition', 'inline; filename=tts.wav');
+      res.set('Cache-Control', 'no-store, max-age=0');
+      return res.send(fallback);
+    } catch {
+      return next(e);
+    }
+  }
+});
+
+// 7️⃣ Główna ścieżka dla Twilio – wszystkie /twilio/voice itd.
 app.use('/twilio', twilioRoutes);
 
-// 7️⃣ 404 – jeśli żaden powyższy route nie zadziałał
+// 8️⃣ 404 – jeśli żaden powyższy route nie zadziałał
 app.use('*', (req, res) => {
   res.status(404).json({
     status: 'error',
@@ -55,18 +94,17 @@ app.use('*', (req, res) => {
   });
 });
 
-// 8️⃣ Error handler – łapie wszystkie nieprzewidziane błędy
+// 9️⃣ Error handler – łapie wszystkie nieprzewidziane błędy
 app.use((err, req, res, next) => {
   logger.error('❌ UNHANDLED ERROR:', err);
   res.status(500).json({
     status: 'error',
     message: 'Coś poszło nie tak!',
-    // w dev pokażemy szczegóły, w prod nie
     error: process.env.NODE_ENV === 'development' ? err.message : {}
   });
 });
 
-// 9️⃣ Start serwera
+// 🔟 Start serwera
 app.listen(PORT, HOST, () => {
   logger.info(`🚀 Serwer działa na http://${HOST}:${PORT}`);
   logger.info('🔑 Sprawdzam zmienne środowiskowe…');
