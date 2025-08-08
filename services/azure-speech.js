@@ -2,35 +2,38 @@
 const sdk = require('microsoft-cognitiveservices-speech-sdk');
 const logger = require('../utils/logger');
 
+// --- Konfiguracja Azure ---
 const speechConfig = sdk.SpeechConfig.fromSubscription(
   process.env.AZURE_SPEECH_KEY,
   process.env.AZURE_SPEECH_REGION
 );
 
-// ASR (rozpoznawanie) po polsku
+// Rozpoznawanie mowy po polsku (gdybyś używał STT z plików)
 speechConfig.speechRecognitionLanguage = 'pl-PL';
 
-// TTS – natywny polski głos neural (zmienisz ENV AZURE_VOICE_NAME)
+// Domyślny głos: z ENV albo polski Agnieszka
 const DEFAULT_VOICE = process.env.AZURE_VOICE_NAME || 'pl-PL-AgnieszkaNeural';
 speechConfig.speechSynthesisVoiceName = DEFAULT_VOICE;
 
-// Format idealny pod telefon/Twilio <Play>
+// Format idealny pod połączenia telefoniczne/Twilio <Play>
 speechConfig.speechSynthesisOutputFormat =
   sdk.SpeechSynthesisOutputFormat.Riff8Khz8BitMonoMULaw;
 
-// --- prosty cache TTS, żeby było szybciej ---
+logger.info(`🗣️ Azure TTS voice: ${DEFAULT_VOICE}${process.env.AZURE_VOICE_NAME ? '' : ' (default)'}`);
+
+// --- Prosty cache TTS (przyspiesza powtarzane kwestie) ---
 const MAX_CACHE = 100;
 const ttsCache = new Map();
-function cacheKey(text, voice) { return `${voice || DEFAULT_VOICE}|${text}`; }
+function cacheKey(text, voice) { return `${voice}|${text}`; }
 function setCache(key, buf) {
   ttsCache.set(key, buf);
   if (ttsCache.size > MAX_CACHE) {
-    const firstKey = ttsCache.keys().next().value;
-    ttsCache.delete(firstKey);
+    const first = ttsCache.keys().next().value;
+    ttsCache.delete(first);
   }
 }
 
-// ===== SSML =====
+// ===== Pomocnicze =====
 function escapeXml(s = '') {
   return s.replace(/[<>&'"]/g, c => ({
     '<': '&lt;',
@@ -41,14 +44,33 @@ function escapeXml(s = '') {
   }[c]));
 }
 
+/**
+ * Buduje SSML z wymuszeniem polskiej fonetyki.
+ * Dla głosów wielojęzycznych (Jenny/Dragon/Multilingual) owijamy tekst w <lang xml:lang="pl-PL">.
+ */
 function buildSSML(text, voice = DEFAULT_VOICE) {
   const safe = (text || '').toString().trim();
-  return `
-<speak version="1.0" xml:lang="pl-PL">
+  const lang = 'pl-PL';
+  const isMultilingual = /(multilingual|dragon|jenny)/i.test(voice);
+
+  if (isMultilingual) {
+    return `
+<speak version="1.0" xml:lang="${lang}" xmlns:mstts="https://www.w3.org/2001/mstts">
   <voice name="${voice}">
-    <prosody rate="+0%" pitch="+0%">
-      ${escapeXml(safe)}
-    </prosody>
+    <lang xml:lang="${lang}">
+      <mstts:express-as style="assistant">
+        <prosody rate="+0%" pitch="+0%">${escapeXml(safe)}</prosody>
+      </mstts:express-as>
+    </lang>
+  </voice>
+</speak>`;
+  }
+
+  // Zwykłe polskie głosy (Agnieszka/Marek/Zofia)
+  return `
+<speak version="1.0" xml:lang="${lang}">
+  <voice name="${voice}">
+    <prosody rate="+0%" pitch="+0%">${escapeXml(safe)}</prosody>
   </voice>
 </speak>`;
 }
@@ -73,28 +95,28 @@ async function textToSpeech(text, voiceName) {
       ssml,
       result => {
         if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
-          logger.info('TTS ok');
           const buf = Buffer.from(result.audioData);
           setCache(key, buf);
           synthesizer.close();
+          logger.info('TTS ok');
           resolve(buf);
         } else {
           const err = result.errorDetails || 'TTS unknown error';
-          logger.error('TTS failed:', err);
           synthesizer.close();
+          logger.error('TTS failed:', err);
           reject(new Error(err));
         }
       },
       error => {
-        logger.error('TTS error:', error);
         synthesizer.close();
+        logger.error('TTS error:', error);
         reject(error);
       }
     );
   });
 }
 
-// ===== STT (jeśli kiedyś będziesz używać Azure STT z pliku) =====
+// ===== STT (jeśli będziesz używać Azure do transkrypcji plików) =====
 async function speechToText(audioBuffer) {
   try {
     logger.info('STT: wav buffer -> text');
@@ -132,7 +154,7 @@ async function speechToText(audioBuffer) {
   }
 }
 
-// (opcjonalne – mikrofon lokalny; na serwerze raczej nieużywane)
+// (opcjonalne – mikrofon lokalny; na serwerze zwykle nieużywane)
 function createSpeechRecognizer() {
   try {
     const audioConfig = sdk.AudioConfig.fromDefaultMicrophoneInput();
@@ -143,7 +165,6 @@ function createSpeechRecognizer() {
         logger.info(`Recognized: ${e.result.text}`);
       }
     };
-
     recognizer.canceled = (_, e) => {
       logger.error(`Recognition canceled: ${e.reason}`);
       if (e.reason === sdk.CancellationReason.Error) {
@@ -151,7 +172,6 @@ function createSpeechRecognizer() {
       }
       recognizer.stopContinuousRecognitionAsync();
     };
-
     recognizer.sessionStopped = () => {
       logger.info('Session stopped');
       recognizer.stopContinuousRecognitionAsync();
@@ -164,12 +184,13 @@ function createSpeechRecognizer() {
   }
 }
 
+// ===== Lista dostępnych polskich głosów (wersja kompatybilna z SDK) =====
 async function getAvailableVoices() {
   try {
     const synthesizer = new sdk.SpeechSynthesizer(speechConfig);
     return new Promise((resolve, reject) => {
+      // Wersja bezparametrowa – działa w każdej wersji SDK
       synthesizer.getVoicesAsync(
-        'pl-PL',
         result => {
           if (!result || !result.voices) {
             synthesizer.close();
@@ -193,7 +214,7 @@ async function getAvailableVoices() {
   }
 }
 
-// Pre-warm – nagrzewa cache najczęstszych fraz
+// ===== Pre-warm – nagrzewa cache najczęstszych fraz =====
 async function prewarm(phrases = [], voice) {
   try {
     for (const p of phrases) {
