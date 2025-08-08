@@ -12,7 +12,8 @@ const speechConfig = sdk.SpeechConfig.fromSubscription(
 speechConfig.speechRecognitionLanguage = 'pl-PL';
 
 // Domyślny głos: z ENV albo polski Agnieszka
-const DEFAULT_VOICE = process.env.AZURE_VOICE_NAME || 'pl-PL-AgnieszkaNeural';
+const DEFAULT_VOICE = process.env.AZURE_VOICE_NAME || 'en-US-JennyMultilingualNeural';
+
 speechConfig.speechSynthesisVoiceName = DEFAULT_VOICE;
 
 // Format idealny pod połączenia telefoniczne/Twilio <Play>
