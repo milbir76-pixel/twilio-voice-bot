@@ -10,16 +10,27 @@ const speechConfig = sdk.SpeechConfig.fromSubscription(
 // ASR (rozpoznawanie) po polsku
 speechConfig.speechRecognitionLanguage = 'pl-PL';
 
-// TTS – domyślnie NATYWNY polski głos neural.
-// Możesz nadpisać przez AZURE_VOICE_NAME w env.
+// TTS – natywny polski głos neural (zmienisz ENV AZURE_VOICE_NAME)
 const DEFAULT_VOICE = process.env.AZURE_VOICE_NAME || 'pl-PL-AgnieszkaNeural';
 speechConfig.speechSynthesisVoiceName = DEFAULT_VOICE;
 
-// Najlepszy format pod telefon/Twilio <Play>
+// Format idealny pod telefon/Twilio <Play>
 speechConfig.speechSynthesisOutputFormat =
   sdk.SpeechSynthesisOutputFormat.Riff8Khz8BitMonoMULaw;
 
-// ===== TTS =====
+// --- prosty cache TTS, żeby było szybciej ---
+const MAX_CACHE = 100;
+const ttsCache = new Map();
+function cacheKey(text, voice) { return `${voice || DEFAULT_VOICE}|${text}`; }
+function setCache(key, buf) {
+  ttsCache.set(key, buf);
+  if (ttsCache.size > MAX_CACHE) {
+    const firstKey = ttsCache.keys().next().value;
+    ttsCache.delete(firstKey);
+  }
+}
+
+// ===== SSML =====
 function escapeXml(s = '') {
   return s.replace(/[<>&'"]/g, c => ({
     '<': '&lt;',
@@ -42,13 +53,18 @@ function buildSSML(text, voice = DEFAULT_VOICE) {
 </speak>`;
 }
 
-/**
- * Zamienia tekst na audio (WAV RIFF 8kHz μ-law) – idealne do Twilio <Play>.
- * Zwraca Buffer.
- */
+// ===== TTS -> Buffer WAV 8kHz μ-law =====
 async function textToSpeech(text, voiceName) {
-  const ssml = buildSSML(text, voiceName || DEFAULT_VOICE);
-  logger.info(`TTS start voice=${voiceName || DEFAULT_VOICE} len=${(text || '').length}`);
+  const voice = voiceName || DEFAULT_VOICE;
+  const ssml = buildSSML(text, voice);
+  const key = cacheKey(text, voice);
+
+  if (ttsCache.has(key)) {
+    logger.debug(`TTS cache HIT: ${key}`);
+    return ttsCache.get(key);
+  }
+
+  logger.info(`TTS start voice=${voice} len=${(text || '').length}`);
 
   return new Promise((resolve, reject) => {
     const synthesizer = new sdk.SpeechSynthesizer(speechConfig);
@@ -59,6 +75,7 @@ async function textToSpeech(text, voiceName) {
         if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
           logger.info('TTS ok');
           const buf = Buffer.from(result.audioData);
+          setCache(key, buf);
           synthesizer.close();
           resolve(buf);
         } else {
@@ -77,7 +94,7 @@ async function textToSpeech(text, voiceName) {
   });
 }
 
-// ===== STT (jeśli będziesz używać Azure do rozpoznawania nagrań) =====
+// ===== STT (jeśli kiedyś będziesz używać Azure STT z pliku) =====
 async function speechToText(audioBuffer) {
   try {
     logger.info('STT: wav buffer -> text');
@@ -115,7 +132,7 @@ async function speechToText(audioBuffer) {
   }
 }
 
-// (opcjonalne dla lokalnych testów z mikrofonu – na serwerze zazwyczaj nieużywane)
+// (opcjonalne – mikrofon lokalny; na serwerze raczej nieużywane)
 function createSpeechRecognizer() {
   try {
     const audioConfig = sdk.AudioConfig.fromDefaultMicrophoneInput();
@@ -151,7 +168,6 @@ async function getAvailableVoices() {
   try {
     const synthesizer = new sdk.SpeechSynthesizer(speechConfig);
     return new Promise((resolve, reject) => {
-      // Poproś bezpośrednio o polskie głosy – mniej danych
       synthesizer.getVoicesAsync(
         'pl-PL',
         result => {
@@ -177,10 +193,23 @@ async function getAvailableVoices() {
   }
 }
 
+// Pre-warm – nagrzewa cache najczęstszych fraz
+async function prewarm(phrases = [], voice) {
+  try {
+    for (const p of phrases) {
+      await textToSpeech(p, voice);
+    }
+    logger.info(`TTS prewarm done for ${phrases.length} phrase(s).`);
+  } catch (e) {
+    logger.warn('TTS prewarm error:', e);
+  }
+}
+
 module.exports = {
   textToSpeech,
   speechToText,
   createSpeechRecognizer,
   getAvailableVoices,
   buildSSML,
+  prewarm,
 };

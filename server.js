@@ -14,6 +14,7 @@ const app = express();
 
 // 🔒 Zaufaj proxy (Railway/Load balancer) – poprawne proto/host w req.*
 app.set('trust proxy', true);
+app.disable('x-powered-by'); // kosmetyka bezpieczeństwa
 
 // 2️⃣ Ustaw port i host (Railway nadpisze PORT automatycznie)
 const PORT = process.env.PORT || 3000;
@@ -26,7 +27,9 @@ app.use(express.json());                          // odczyt JSON
 
 // 4️⃣ Logger – wypisz każde zapytanie
 app.use((req, res, next) => {
-  logger.info(`📨 ${req.method} ${req.path} from ${req.ip}`);
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  logger.info(`📨 ${req.method} ${proto}://${host}${req.originalUrl} from ${req.ip}`);
   next();
 });
 
@@ -70,7 +73,7 @@ app.get('/tts', async (req, res, next) => {
     res.send(audioBuf);
   } catch (e) {
     logger.error('TTS endpoint error:', e);
-    // nie wywalamy 500 bez treści – Twilio lepiej zareaguje na WAV z komunikatem
+    // awaryjnie spróbujmy wygenerować prosty komunikat
     try {
       const fallback = await azureTTS.textToSpeech('Przepraszam, wystąpił błąd techniczny.');
       res.set('Content-Type', 'audio/wav');
@@ -82,6 +85,22 @@ app.get('/tts', async (req, res, next) => {
     }
   }
 });
+
+// 6.5️⃣ Pre-warm TTS – nagrzewamy najczęstsze frazy do cache (szybszy start)
+const PREWARM_VOICE = process.env.AZURE_VOICE_NAME || 'pl-PL-AgnieszkaNeural';
+const PREWARM_PHRASES = [
+  'Dzień dobry,tutaj wirtualna asystentka Stomatologia Kraków. W czym mogę pomóc?',
+  'Czy mogę jeszcze w czymś pomóc?',
+  'Łączę z recepcją. Numer recepcji to +48 123 456 789.',
+  'Przepraszam, wystąpił błąd techniczny. Proszę spróbować ponownie.'
+];
+(async () => {
+  try {
+    await azureTTS.prewarm(PREWARM_PHRASES, PREWARM_VOICE);
+  } catch (e) {
+    logger.warn('Prewarm failed:', e);
+  }
+})();
 
 // 7️⃣ Główna ścieżka dla Twilio – wszystkie /twilio/voice itd.
 app.use('/twilio', twilioRoutes);
